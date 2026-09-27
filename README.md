@@ -15,6 +15,8 @@ Codec choices follow the selected format: MP4 offers H.264/H.265, WebM offers VP
 
 On niri, selected-window capture uses the ScreenCast portal. If a user-level `~/.config/xdg-desktop-portal/portals.conf` overrides niri's portal selection, set `org.freedesktop.impl.portal.ScreenCast=gnome` under `[preferred]` so the window picker is available.
 
+If selecting a window fails with `no more input formats`, the PipeWire stream could not negotiate a video format with niri. This is independent of the chosen output codec; see [niri's screencast issue](https://github.com/niri-wm/niri/issues/3145). Region and display capture through `wf-recorder` remain available.
+
 The interface groups capture, video, audio, and save controls, with a recording timer and stop button that remain visible while scrolling. **Ctrl+R** starts and **Ctrl+Shift+R** stops when the app is focused. After recording, **Open video** and **Open folder** are available. Settings are saved to `$XDG_CONFIG_HOME/wf-recorder-control/settings.ini` (usually `~/.config/wf-recorder-control/settings.ini`). Codec choices are limited to encoders installed for the selected capture mode.
 
 Files are timestamped and never intentionally overwritten. Select **Stop and save** before closing the app.

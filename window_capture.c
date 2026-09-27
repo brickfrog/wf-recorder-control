@@ -162,7 +162,18 @@ static gboolean start_pipeline(WindowCapture *capture, guint node, GError **erro
     capture->bus_watch = gst_bus_add_watch(bus, bus_message, capture);
     gst_object_unref(bus);
     if (gst_element_set_state(capture->pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
-        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Could not start window capture pipeline");
+        GstBus *error_bus = gst_element_get_bus(capture->pipeline);
+        GstMessage *failure = gst_bus_pop_filtered(error_bus, GST_MESSAGE_ERROR);
+        if (failure) {
+            GError *gst_error = NULL;
+            gst_message_parse_error(failure, &gst_error, NULL);
+            g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Could not start window capture pipeline: %s",
+                        gst_error ? gst_error->message : "unknown GStreamer error");
+            g_clear_error(&gst_error);
+            gst_message_unref(failure);
+        } else
+            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Could not start window capture pipeline");
+        gst_object_unref(error_bus);
         goto fail;
     }
     gst_object_unref(source);
