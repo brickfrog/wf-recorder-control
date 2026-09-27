@@ -1,10 +1,17 @@
 CC ?= cc
-CFLAGS += -O2 -Wall -Wextra -Wno-deprecated-declarations $(shell pkg-config --cflags gtk4 libportal-gtk4 gstreamer-1.0)
-LDLIBS += $(shell pkg-config --libs gtk4 libportal-gtk4 gstreamer-1.0)
+CFLAGS += -O2 -Wall -Wextra -Wno-deprecated-declarations $(shell pkg-config --cflags gtk4 libportal-gtk4 gstreamer-1.0 libavcodec)
+LDLIBS += $(shell pkg-config --libs gtk4 libportal-gtk4 gstreamer-1.0 libavcodec)
 
-wf-recorder-control: main.c window_capture.c window_capture.h
-	$(CC) $(CFLAGS) -o $@ main.c window_capture.c $(LDLIBS)
+wf-recorder-control: main.c window_capture.c window_capture.h encoding.c encoding.h
+	$(CC) $(CFLAGS) -o $@ main.c window_capture.c encoding.c $(LDLIBS)
+
+test-encoding: test_encoding.c encoding.c encoding.h
+	$(CC) $(CFLAGS) -o $@ test_encoding.c encoding.c $(LDLIBS)
+
+.PHONY: check
+check: test-encoding
+	./test-encoding
 
 .PHONY: clean
 clean:
-	rm -f wf-recorder-control
+	rm -f wf-recorder-control test-encoding

@@ -13,7 +13,7 @@ struct WindowCapture {
     guint bus_watch;
     gint pipewire_fd;
     gchar *filename, *format, *codec, *preset, *audio;
-    gint fps, crf;
+    gint fps, quantizer, bitrate;
     WindowCaptureEvent event;
     gpointer data;
 };
@@ -126,19 +126,28 @@ static gboolean start_pipeline(WindowCapture *capture, guint node, GError **erro
     g_object_set(output, "location", capture->filename, NULL);
     g_free(path);
     if (!g_strcmp0(capture->codec, "libx264")) {
-        g_object_set(video, "pass", 5, "quantizer", capture->crf, NULL);
+        g_object_set(video, "pass", 5, "quantizer", capture->quantizer, NULL);
         gst_util_set_object_arg(G_OBJECT(video), "speed-preset", capture->preset);
     } else if (!g_strcmp0(capture->codec, "libx265")) {
-        gchar *options = g_strdup_printf("crf=%d", capture->crf);
+        gchar *options = g_strdup_printf("crf=%d", capture->quantizer);
         g_object_set(video, "option-string", options, NULL);
         gst_util_set_object_arg(G_OBJECT(video), "speed-preset", capture->preset);
         g_free(options);
     } else if (!g_strcmp0(capture->codec, "libvpx-vp9")) {
-        g_object_set(video, "end-usage", 2, "cq-level", capture->crf, NULL);
+        g_object_set(video, "end-usage", 2, "cq-level", capture->quantizer, NULL);
     } else if (!g_strcmp0(capture->codec, "libaom-av1")) {
         g_object_set(video, "end-usage", 3,
-                     "min-quantizer", (guint)capture->crf,
-                     "max-quantizer", (guint)capture->crf, NULL);
+                     "min-quantizer", (guint)capture->quantizer,
+                     "max-quantizer", (guint)capture->quantizer, NULL);
+    } else if (!g_strcmp0(capture->codec, "h264_vaapi") ||
+               !g_strcmp0(capture->codec, "hevc_vaapi")) {
+        if (capture->bitrate > 0)
+            g_object_set(video, "rate-control", 4, "bitrate", (guint)capture->bitrate, NULL);
+        else
+            g_object_set(video, "rate-control", 16,
+                         "qpi", (guint)capture->quantizer,
+                         "qpp", (guint)capture->quantizer,
+                         "qpb", (guint)capture->quantizer, NULL);
     }
     if (with_audio) {
         GstElement *audio = gst_bin_get_by_name(GST_BIN(capture->pipeline), "audio_src");
@@ -216,7 +225,7 @@ static void session_created(GObject *source, GAsyncResult *result, gpointer data
 
 WindowCapture *window_capture_begin(GtkWindow *parent, const gchar *filename,
                                      const gchar *format, const gchar *codec,
-                                     gint fps, gint crf, const gchar *preset,
+                                     gint fps, gint quantizer, gint bitrate, const gchar *preset,
                                      const gchar *audio, WindowCaptureEvent event,
                                      gpointer data) {
     WindowCapture *capture = g_new0(WindowCapture, 1);
@@ -229,7 +238,8 @@ WindowCapture *window_capture_begin(GtkWindow *parent, const gchar *filename,
     capture->preset = g_strdup(preset);
     capture->audio = g_strdup(audio);
     capture->fps = fps;
-    capture->crf = crf;
+    capture->quantizer = quantizer;
+    capture->bitrate = bitrate;
     capture->event = event;
     capture->data = data;
     xdp_portal_create_screencast_session(capture->portal, XDP_OUTPUT_WINDOW,
