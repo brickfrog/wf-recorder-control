@@ -1,9 +1,9 @@
 CC ?= cc
-CFLAGS += -O2 -Wall -Wextra -Wno-deprecated-declarations $(shell pkg-config --cflags gtk4)
-LDLIBS += $(shell pkg-config --libs gtk4)
+CFLAGS += -O2 -Wall -Wextra -Wno-deprecated-declarations $(shell pkg-config --cflags gtk4 libportal-gtk4 gstreamer-1.0)
+LDLIBS += $(shell pkg-config --libs gtk4 libportal-gtk4 gstreamer-1.0)
 
-wf-recorder-control: main.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDLIBS)
+wf-recorder-control: main.c window_capture.c window_capture.h
+	$(CC) $(CFLAGS) -o $@ main.c window_capture.c $(LDLIBS)
 
 .PHONY: clean
 clean:
