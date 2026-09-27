@@ -9,13 +9,13 @@ make
 ./wf-recorder-control
 ```
 
-Build dependencies: a C compiler, `make`, GTK4, libportal-gtk4, GStreamer, and FFmpeg's libavcodec development files. Runtime dependencies: `wf-recorder`, `slurp`, PipeWire, `xdg-desktop-portal-gnome`, and the GStreamer PipeWire, PulseAudio, encoding, and muxer plugins. `pactl` lists audio sources. The app has controls for region, selected window, or display capture; audio source; format; codec; frame rate; quality; save folder; and advanced wf-recorder arguments. Hardware codecs offer a target bitrate override (0 uses constant quality). Advanced wf-recorder arguments are disabled in window mode.
+Build dependencies: a C compiler, `make`, GTK4, libportal-gtk4, libpipewire, GStreamer with its app library, and FFmpeg's libavcodec development files. Runtime dependencies: `wf-recorder`, `slurp`, PipeWire, `xdg-desktop-portal-gnome`, and the GStreamer PulseAudio, encoding, and muxer plugins. `pactl` lists audio sources. The app has controls for region, selected window, or display capture; audio source; format; codec; frame rate; quality; save folder; and advanced wf-recorder arguments. Hardware codecs offer a target bitrate override (0 uses constant quality). Advanced wf-recorder arguments are disabled in window mode.
 
 Codec choices follow the selected format: MP4 offers H.264/H.265, WebM offers VP9/AV1, and Matroska offers all listed codecs. The same format and codec choices are available for window capture.
 
 On niri, selected-window capture uses the ScreenCast portal. If a user-level `~/.config/xdg-desktop-portal/portals.conf` overrides niri's portal selection, set `org.freedesktop.impl.portal.ScreenCast=gnome` under `[preferred]` so the window picker is available.
 
-If selecting a window fails with `no more input formats`, the PipeWire stream could not negotiate a video format with niri. This is independent of the chosen output codec; see [niri's screencast issue](https://github.com/niri-wm/niri/issues/3145). Region and display capture through `wf-recorder` remain available.
+Window capture reads niri's linear DMA-BUF stream directly through PipeWire and sends frames to GStreamer for encoding. The recorder keeps the selected window's elapsed duration even when its contents remain still.
 
 The interface groups capture, video, audio, and save controls, with a recording timer and stop button that remain visible while scrolling. **Ctrl+R** starts and **Ctrl+Shift+R** stops when the app is focused. After recording, **Open video** and **Open folder** are available. Settings are saved to `$XDG_CONFIG_HOME/wf-recorder-control/settings.ini` (usually `~/.config/wf-recorder-control/settings.ini`). Codec choices are limited to encoders installed for the selected capture mode.
 

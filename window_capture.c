@@ -1,6 +1,8 @@
 #include "window_capture.h"
+#include "portal_pipewire.h"
 
 #include <gst/gst.h>
+#include <gst/app/gstappsrc.h>
 #include <libportal-gtk4/portal-gtk4.h>
 #include <unistd.h>
 
@@ -10,7 +12,9 @@ struct WindowCapture {
     XdpParent *portal_parent;
     XdpSession *session;
     GstElement *pipeline;
+    PortalPipeWire *source;
     guint bus_watch;
+    guint source_watch;
     gint pipewire_fd;
     gchar *filename, *format, *codec, *preset, *audio;
     gint fps, quantizer, bitrate;
@@ -19,10 +23,15 @@ struct WindowCapture {
 };
 
 static void capture_finish(WindowCapture *capture, const gchar *message) {
+    if (capture->source_watch) {
+        g_source_remove(capture->source_watch);
+        capture->source_watch = 0;
+    }
     if (capture->bus_watch) {
         g_source_remove(capture->bus_watch);
         capture->bus_watch = 0;
     }
+    portal_pipewire_free(capture->source);
     if (capture->pipeline) {
         gst_element_set_state(capture->pipeline, GST_STATE_NULL);
         gst_object_unref(capture->pipeline);
@@ -47,8 +56,9 @@ static gboolean bus_message(GstBus *bus, GstMessage *message, gpointer data) {
     WindowCapture *capture = data;
     (void)bus;
     if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS) {
+        gboolean has_video = portal_pipewire_frames(capture->source) > 0;
         capture->bus_watch = 0;
-        capture_finish(capture, NULL);
+        capture_finish(capture, has_video ? NULL : "No video frames were captured");
         return G_SOURCE_REMOVE;
     }
     if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_ERROR) {
@@ -61,6 +71,19 @@ static gboolean bus_message(GstBus *bus, GstMessage *message, gpointer data) {
         g_free(text);
         g_clear_error(&error);
         g_free(debug);
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static gboolean source_health(gpointer data) {
+    WindowCapture *capture = data;
+    const gchar *error = portal_pipewire_error(capture->source);
+    if (error) {
+        gchar *message = g_strdup_printf("Window capture failed: %s", error);
+        capture->source_watch = 0;
+        capture_finish(capture, message);
+        g_free(message);
         return G_SOURCE_REMOVE;
     }
     return G_SOURCE_CONTINUE;
@@ -102,7 +125,7 @@ static gboolean start_pipeline(WindowCapture *capture, guint node, GError **erro
     const gchar *audio_encoder = !g_strcmp0(capture->format, "webm") ? "opusenc" : "avenc_aac";
     gchar *description = g_strdup_printf(
         "%s name=mux ! filesink name=output sync=false "
-        "pipewiresrc name=video_src do-timestamp=true ! videoconvert ! videorate ! "
+        "appsrc name=video_src is-live=true format=time do-timestamp=true max-buffers=4 leaky-type=downstream ! videoconvert ! videorate ! "
         "video/x-raw,framerate=%d/1 ! %s name=video_encoder ! %s ! queue ! mux. %s",
         mux, capture->fps, encoder, parser,
         with_audio ? "pulsesrc name=audio_src ! audioconvert ! audioresample ! queue ! " : "");
@@ -121,10 +144,7 @@ static gboolean start_pipeline(WindowCapture *capture, guint node, GError **erro
         g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Missing GStreamer recording element");
         goto fail;
     }
-    gchar *path = g_strdup_printf("%u", node);
-    g_object_set(source, "fd", capture->pipewire_fd, "path", path, NULL);
     g_object_set(output, "location", capture->filename, NULL);
-    g_free(path);
     if (!g_strcmp0(capture->codec, "libx264")) {
         g_object_set(video, "pass", 5, "quantizer", capture->quantizer, NULL);
         gst_util_set_object_arg(G_OBJECT(video), "speed-preset", capture->preset);
@@ -176,6 +196,11 @@ static gboolean start_pipeline(WindowCapture *capture, guint node, GError **erro
         gst_object_unref(error_bus);
         goto fail;
     }
+    capture->source = portal_pipewire_new(capture->pipewire_fd, node, source, error);
+    if (!capture->source) goto fail;
+    close(capture->pipewire_fd);
+    capture->pipewire_fd = -1;
+    capture->source_watch = g_timeout_add(200, source_health, capture);
     gst_object_unref(source);
     gst_object_unref(video);
     gst_object_unref(output);
@@ -262,6 +287,12 @@ WindowCapture *window_capture_begin(GtkWindow *parent, const gchar *filename,
 }
 
 void window_capture_stop(WindowCapture *capture) {
-    if (capture && capture->pipeline)
-        gst_element_send_event(capture->pipeline, gst_event_new_eos());
+    if (capture && capture->pipeline) {
+        portal_pipewire_finish_frame(capture->source);
+        GstElement *source = gst_bin_get_by_name(GST_BIN(capture->pipeline), "video_src");
+        if (source) {
+            gst_app_src_end_of_stream(GST_APP_SRC(source));
+            gst_object_unref(source);
+        }
+    }
 }

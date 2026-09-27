@@ -37,6 +37,7 @@ static gboolean update_timer(gpointer data) {
 
 static void recording_state(Recorder *r, gboolean active) {
     gtk_widget_set_sensitive(r->controls, !active);
+    gtk_widget_set_sensitive(r->start, !active);
     gtk_widget_set_visible(r->start, !active);
     gtk_widget_set_visible(r->stop, active);
     gtk_widget_set_sensitive(r->stop, active);
