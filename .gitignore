@@ -1,2 +1,6 @@
 /wf-recorder-control
 /test-encoding
+/.smoke/
+*.mp4
+*.mkv
+*.webm

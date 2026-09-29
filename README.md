@@ -4,11 +4,13 @@ A GTK4 screen recorder for Wayland. It uses `slurp` and `wf-recorder` for region
 
 ## Features
 
-- Record a selected window, screen region, or display.
+- Record a selected window, screen region, or display. Pick the mode from the Region, Window, and Display tiles.
+- Optionally count down 3 seconds after you choose the target and before recording starts.
+- Watch a live preview while recording, with file size, average bitrate, and an audio level meter. Window capture previews its own frames at up to 15 fps; region and display capture take a `grim` snapshot every second.
 - Save MP4, WebM, or Matroska video with codec choices filtered by format and installed encoders.
 - Set audio source, frame rate, quality, output folder, and optional `wf-recorder` arguments for region/display capture.
-- Keep recording controls and the timer visible while scrolling. Use **Ctrl+R** to start or **Ctrl+Shift+R** to stop when the app is focused.
-- Open the saved video or its folder from the app. Settings persist in `$XDG_CONFIG_HOME/wf-recorder-control/settings.ini`.
+- Keep recording controls and the timer visible while scrolling. Use **Ctrl+R** to start or **Ctrl+Shift+R** to stop (or cancel the countdown) when the app is focused.
+- Play the last recording inline, see its length, resolution, and size, and open the video or its folder. Settings persist in `$XDG_CONFIG_HOME/wf-recorder-control/settings.ini`.
 
 | Container | Available video codecs |
 | --- | --- |
@@ -22,7 +24,7 @@ H.264, H.265, VP9, and AV1 software encoders appear when installed. VA-API H.264
 
 Build dependencies: a C compiler, `make`, and development files for GTK4, libportal-gtk4, libpipewire, GStreamer (including `gstreamer-app-1.0`), and FFmpeg's libavcodec.
 
-Runtime dependencies: `wf-recorder`, `slurp`, PipeWire, a working ScreenCast portal for window capture, and `pactl` for listing audio sources. Window recording also needs the relevant GStreamer encoder, parser, and muxer plugins. Window audio recording needs the GStreamer PulseAudio plugin.
+Runtime dependencies: `wf-recorder`, `slurp`, PipeWire, a working ScreenCast portal for window capture, and `pactl` for listing audio sources. Window recording also needs the relevant GStreamer encoder, parser, and muxer plugins. Window audio recording and the audio level meter need the GStreamer PulseAudio plugin; the meter also needs the `level` plugin from gst-plugins-good. The region/display preview needs `grim` (optional). Inline playback of the last recording uses GTK's GStreamer media backend and the matching decoders.
 
 Build, test, and run from this directory:
 
@@ -40,7 +42,7 @@ Choose **Select a window**, click **Start recording**, and pick the target in th
 org.freedesktop.impl.portal.ScreenCast=gnome
 ```
 
-Window capture reads niri's linear DMA-BUF PipeWire stream and sends frames to GStreamer for encoding. A window that does not change still produces a video with the full elapsed recording time.
+Window capture reads niri's linear DMA-BUF PipeWire stream and sends frames to GStreamer for encoding. niri sends window frames only while the window is on screen. Recording starts with the first frame, so a window that is off screen when you start is recorded from the moment it appears. While recording, the newest frame repeats whenever niri sends none (the window did not change, or it is hidden or off screen), so video and audio stay the full elapsed length.
 
 To keep the recorder controls accessible on niri, add this optional rule to `~/.config/niri/config.kdl`:
 

@@ -14,6 +14,10 @@
 #include <errno.h>
 #include <string.h>
 
+/* While recording, repeat the newest frame when niri sends none (window hidden or off screen),
+ * so video keeps flowing and the muxer never stalls the audio branch. */
+#define KEEPALIVE_MS 100
+
 struct PortalPipeWire {
     struct pw_thread_loop *loop;
     struct pw_context *context;
@@ -25,8 +29,12 @@ struct PortalPipeWire {
     gint failed;
     gchar *failure;
     gint frames_pushed;
+    gint frames_seen;
+    gint active;
+    guint heartbeat;
     GMutex frame_lock;
     GstBuffer *last_frame;
+    gint64 last_push_us;
 };
 
 static void fail_source(PortalPipeWire *source, const gchar *message) {
@@ -112,11 +120,15 @@ static void process_frame(void *data) {
                 for (guint y = 0; y < height; y++)
                     memcpy(map.data + (gsize)y * row, from + (gsize)y * stride, row);
                 gst_buffer_unmap(out, &map);
+                gboolean active = g_atomic_int_get(&source->active);
                 g_mutex_lock(&source->frame_lock);
                 gst_clear_buffer(&source->last_frame);
                 source->last_frame = gst_buffer_ref(out);
+                if (active) source->last_push_us = g_get_monotonic_time();
                 g_mutex_unlock(&source->frame_lock);
-                if (gst_app_src_push_buffer(GST_APP_SRC(source->appsrc), out) == GST_FLOW_OK)
+                g_atomic_int_inc(&source->frames_seen);
+                if (!active) gst_buffer_unref(out);
+                else if (gst_app_src_push_buffer(GST_APP_SRC(source->appsrc), out) == GST_FLOW_OK)
                     g_atomic_int_inc(&source->frames_pushed);
             } else gst_buffer_unref(out);
         }
@@ -210,10 +222,19 @@ guint portal_pipewire_frames(PortalPipeWire *source) {
     return source ? (guint)g_atomic_int_get(&source->frames_pushed) : 0;
 }
 
-void portal_pipewire_finish_frame(PortalPipeWire *source) {
-    if (!source) return;
+guint portal_pipewire_frames_seen(PortalPipeWire *source) {
+    return source ? (guint)g_atomic_int_get(&source->frames_seen) : 0;
+}
+
+/* Pushes a copy of the newest frame. With do-timestamp, appsrc stamps it with the current time. */
+static void push_last_frame(PortalPipeWire *source, gboolean only_if_stale) {
+    gint64 now = g_get_monotonic_time();
     g_mutex_lock(&source->frame_lock);
-    GstBuffer *last = source->last_frame ? gst_buffer_copy_deep(source->last_frame) : NULL;
+    GstBuffer *last = NULL;
+    if (source->last_frame && (!only_if_stale || now - source->last_push_us >= KEEPALIVE_MS * 1000)) {
+        last = gst_buffer_copy(source->last_frame);
+        source->last_push_us = now;
+    }
     g_mutex_unlock(&source->frame_lock);
     if (!last) return;
     GST_BUFFER_PTS(last) = GST_CLOCK_TIME_NONE;
@@ -223,8 +244,31 @@ void portal_pipewire_finish_frame(PortalPipeWire *source) {
         g_atomic_int_inc(&source->frames_pushed);
 }
 
+static gboolean keepalive(gpointer data) {
+    push_last_frame(data, TRUE);
+    return G_SOURCE_CONTINUE;
+}
+
+void portal_pipewire_activate(PortalPipeWire *source) {
+    if (!source || g_atomic_int_get(&source->active)) return;
+    g_atomic_int_set(&source->active, TRUE);
+    push_last_frame(source, FALSE);
+    source->heartbeat = g_timeout_add(KEEPALIVE_MS, keepalive, source);
+}
+
+void portal_pipewire_finish_frame(PortalPipeWire *source) {
+    if (!source) return;
+    g_atomic_int_set(&source->active, FALSE);
+    if (source->heartbeat) {
+        g_source_remove(source->heartbeat);
+        source->heartbeat = 0;
+    }
+    push_last_frame(source, FALSE);
+}
+
 void portal_pipewire_free(PortalPipeWire *source) {
     if (!source) return;
+    if (source->heartbeat) g_source_remove(source->heartbeat);
     if (source->loop) pw_thread_loop_stop(source->loop);
     if (source->stream) pw_stream_destroy(source->stream);
     if (source->core) pw_core_disconnect(source->core);

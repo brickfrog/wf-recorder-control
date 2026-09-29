@@ -2,6 +2,7 @@
 #include "portal_pipewire.h"
 
 #include <gst/gst.h>
+#include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
 #include <libportal-gtk4/portal-gtk4.h>
 #include <unistd.h>
@@ -16,6 +17,8 @@ struct WindowCapture {
     guint bus_watch;
     guint source_watch;
     gint pipewire_fd;
+    guint node;
+    gboolean playing;
     gchar *filename, *format, *codec, *preset, *audio;
     gint fps, quantizer, bitrate;
     WindowCaptureEvent event;
@@ -43,7 +46,7 @@ static void capture_finish(WindowCapture *capture, const gchar *message) {
     }
     if (capture->portal_parent) xdp_parent_free(capture->portal_parent);
     if (capture->portal) g_object_unref(capture->portal);
-    capture->event(FALSE, message, capture->data);
+    capture->event(WINDOW_CAPTURE_FINISHED, message, capture->data);
     g_free(capture->filename);
     g_free(capture->format);
     g_free(capture->codec);
@@ -76,6 +79,36 @@ static gboolean bus_message(GstBus *bus, GstMessage *message, gpointer data) {
     return G_SOURCE_CONTINUE;
 }
 
+static gchar *state_failure(GstElement *pipeline) {
+    GstBus *bus = gst_element_get_bus(pipeline);
+    GstMessage *failure = gst_bus_pop_filtered(bus, GST_MESSAGE_ERROR);
+    gst_object_unref(bus);
+    if (!failure) return g_strdup("Could not start window capture pipeline");
+    GError *error = NULL;
+    gst_message_parse_error(failure, &error, NULL);
+    gchar *message = g_strdup_printf("Could not start window capture pipeline: %s",
+                                     error ? error->message : "unknown GStreamer error");
+    g_clear_error(&error);
+    gst_message_unref(failure);
+    return message;
+}
+
+/* Recording starts on the first window frame, so audio and video share a zero start
+ * and a window that is off screen when recording begins adds no empty lead-in. */
+static gboolean start_playing(WindowCapture *capture) {
+    if (gst_element_set_state(capture->pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
+        gchar *message = state_failure(capture->pipeline);
+        capture->source_watch = 0;
+        capture_finish(capture, message);
+        g_free(message);
+        return FALSE;
+    }
+    capture->playing = TRUE;
+    portal_pipewire_activate(capture->source);
+    capture->event(WINDOW_CAPTURE_STARTED, NULL, capture->data);
+    return TRUE;
+}
+
 static gboolean source_health(gpointer data) {
     WindowCapture *capture = data;
     const gchar *error = portal_pipewire_error(capture->source);
@@ -86,6 +119,8 @@ static gboolean source_health(gpointer data) {
         g_free(message);
         return G_SOURCE_REMOVE;
     }
+    if (!capture->playing && portal_pipewire_frames_seen(capture->source) > 0 && !start_playing(capture))
+        return G_SOURCE_REMOVE;
     return G_SOURCE_CONTINUE;
 }
 
@@ -113,7 +148,7 @@ static const gchar *mux_name(const gchar *format) {
     return NULL;
 }
 
-static gboolean start_pipeline(WindowCapture *capture, guint node, GError **error) {
+static gboolean start_pipeline(WindowCapture *capture, GError **error) {
     const gchar *encoder = encoder_name(capture->codec);
     const gchar *parser = parser_name(capture->codec);
     const gchar *mux = mux_name(capture->format);
@@ -126,8 +161,12 @@ static gboolean start_pipeline(WindowCapture *capture, guint node, GError **erro
     gchar *description = g_strdup_printf(
         "%s name=mux ! filesink name=output sync=false "
         "appsrc name=video_src is-live=true format=time do-timestamp=true max-buffers=4 leaky-type=downstream ! videoconvert ! videorate ! "
-        "video/x-raw,framerate=%d/1 ! %s name=video_encoder ! %s ! queue ! mux. %s",
-        mux, capture->fps, encoder, parser,
+        "video/x-raw,framerate=%d/1 ! tee name=split "
+        "split. ! queue leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! videorate drop-only=true max-rate=15 ! "
+        "videoscale ! videoconvert ! video/x-raw,format=RGBA,width=%d,pixel-aspect-ratio=1/1 ! "
+        "appsink name=preview max-buffers=1 drop=true sync=false async=false wait-on-eos=false "
+        "split. ! queue ! %s name=video_encoder ! %s ! queue ! mux. %s",
+        mux, capture->fps, WINDOW_CAPTURE_PREVIEW_WIDTH, encoder, parser,
         with_audio ? "pulsesrc name=audio_src ! audioconvert ! audioresample ! queue ! " : "");
     if (with_audio) {
         gchar *with_encoder = g_strconcat(description, audio_encoder, " ! queue ! mux.", NULL);
@@ -181,26 +220,17 @@ static gboolean start_pipeline(WindowCapture *capture, guint node, GError **erro
     GstBus *bus = gst_element_get_bus(capture->pipeline);
     capture->bus_watch = gst_bus_add_watch(bus, bus_message, capture);
     gst_object_unref(bus);
-    if (gst_element_set_state(capture->pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
-        GstBus *error_bus = gst_element_get_bus(capture->pipeline);
-        GstMessage *failure = gst_bus_pop_filtered(error_bus, GST_MESSAGE_ERROR);
-        if (failure) {
-            GError *gst_error = NULL;
-            gst_message_parse_error(failure, &gst_error, NULL);
-            g_set_error(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Could not start window capture pipeline: %s",
-                        gst_error ? gst_error->message : "unknown GStreamer error");
-            g_clear_error(&gst_error);
-            gst_message_unref(failure);
-        } else
-            g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, "Could not start window capture pipeline");
-        gst_object_unref(error_bus);
+    if (gst_element_set_state(capture->pipeline, GST_STATE_READY) == GST_STATE_CHANGE_FAILURE) {
+        gchar *message = state_failure(capture->pipeline);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, message);
+        g_free(message);
         goto fail;
     }
-    capture->source = portal_pipewire_new(capture->pipewire_fd, node, source, error);
+    capture->source = portal_pipewire_new(capture->pipewire_fd, capture->node, source, error);
     if (!capture->source) goto fail;
     close(capture->pipewire_fd);
     capture->pipewire_fd = -1;
-    capture->source_watch = g_timeout_add(200, source_health, capture);
+    capture->source_watch = g_timeout_add(100, source_health, capture);
     gst_object_unref(source);
     gst_object_unref(video);
     gst_object_unref(output);
@@ -227,9 +257,8 @@ static void session_started(GObject *source, GAsyncResult *result, gpointer data
         return;
     }
     GVariant *first = g_variant_get_child_value(streams, 0);
-    guint node = 0;
     GVariant *properties = NULL;
-    g_variant_get(first, "(u@a{sv})", &node, &properties);
+    g_variant_get(first, "(u@a{sv})", &capture->node, &properties);
     g_variant_unref(properties);
     g_variant_unref(first);
     g_variant_unref(streams);
@@ -238,12 +267,15 @@ static void session_started(GObject *source, GAsyncResult *result, gpointer data
         capture_finish(capture, "Could not open window video stream");
         return;
     }
-    if (!start_pipeline(capture, node, &error)) {
+    capture->event(WINDOW_CAPTURE_SELECTED, NULL, capture->data);
+}
+
+void window_capture_record(WindowCapture *capture) {
+    GError *error = NULL;
+    if (!start_pipeline(capture, &error)) {
         capture_finish(capture, error ? error->message : "Could not start window recorder");
         g_clear_error(&error);
-        return;
     }
-    capture->event(TRUE, NULL, capture->data);
 }
 
 static void session_created(GObject *source, GAsyncResult *result, gpointer data) {
@@ -287,12 +319,47 @@ WindowCapture *window_capture_begin(GtkWindow *parent, const gchar *filename,
 }
 
 void window_capture_stop(WindowCapture *capture) {
-    if (capture && capture->pipeline) {
-        portal_pipewire_finish_frame(capture->source);
-        GstElement *source = gst_bin_get_by_name(GST_BIN(capture->pipeline), "video_src");
-        if (source) {
-            gst_app_src_end_of_stream(GST_APP_SRC(source));
-            gst_object_unref(source);
-        }
+    if (!capture) return;
+    if (!capture->playing) {
+        if (capture->session) capture_finish(capture, "Recording cancelled");
+        return;
     }
+    portal_pipewire_finish_frame(capture->source);
+    GstElement *source = gst_bin_get_by_name(GST_BIN(capture->pipeline), "video_src");
+    if (source) {
+        gst_app_src_end_of_stream(GST_APP_SRC(source));
+        gst_object_unref(source);
+    }
+    /* The muxer finalizes only after every branch ends, including live audio. */
+    GstElement *audio = gst_bin_get_by_name(GST_BIN(capture->pipeline), "audio_src");
+    if (audio) {
+        gst_element_send_event(audio, gst_event_new_eos());
+        gst_object_unref(audio);
+    }
+}
+
+GdkTexture *window_capture_preview(WindowCapture *capture) {
+    if (!capture || !capture->pipeline) return NULL;
+    GstElement *sink = gst_bin_get_by_name(GST_BIN(capture->pipeline), "preview");
+    if (!sink) return NULL;
+    GstSample *sample = gst_app_sink_try_pull_sample(GST_APP_SINK(sink), 0);
+    gst_object_unref(sink);
+    if (!sample) return NULL;
+    GdkTexture *texture = NULL;
+    GstStructure *caps = gst_caps_get_structure(gst_sample_get_caps(sample), 0);
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
+    gint width = 0, height = 0;
+    GstMapInfo map;
+    if (gst_structure_get_int(caps, "width", &width) && gst_structure_get_int(caps, "height", &height) &&
+        width > 0 && height > 0 && gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+        gsize stride = (gsize)width * 4;
+        if (map.size >= stride * (gsize)height) {
+            GBytes *bytes = g_bytes_new(map.data, stride * (gsize)height);
+            texture = gdk_memory_texture_new(width, height, GDK_MEMORY_R8G8B8A8, bytes, stride);
+            g_bytes_unref(bytes);
+        }
+        gst_buffer_unmap(buffer, &map);
+    }
+    gst_sample_unref(sample);
+    return texture;
 }
