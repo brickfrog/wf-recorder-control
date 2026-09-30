@@ -193,11 +193,16 @@ static gboolean start_pipeline(WindowCapture *capture, GError **error) {
         gst_util_set_object_arg(G_OBJECT(video), "speed-preset", capture->preset);
         g_free(options);
     } else if (!g_strcmp0(capture->codec, "libvpx-vp9")) {
-        g_object_set(video, "end-usage", 2, "cq-level", capture->quantizer, NULL);
+        /* Realtime speed settings: the default VP9/AV1 modes cannot keep up with screen capture. */
+        g_object_set(video, "end-usage", 2, "cq-level", capture->quantizer,
+                     "deadline", (gint64)1, "cpu-used", 8, "row-mt", TRUE,
+                     "threads", (gint)MIN(g_get_num_processors(), 64), NULL);
     } else if (!g_strcmp0(capture->codec, "libaom-av1")) {
         g_object_set(video, "end-usage", 3,
                      "min-quantizer", (guint)capture->quantizer,
-                     "max-quantizer", (guint)capture->quantizer, NULL);
+                     "max-quantizer", (guint)capture->quantizer,
+                     "cpu-used", 8, "row-mt", TRUE, "threads", 0u, NULL);
+        gst_util_set_object_arg(G_OBJECT(video), "usage-profile", "realtime");
     } else if (!g_strcmp0(capture->codec, "h264_vaapi") ||
                !g_strcmp0(capture->codec, "hevc_vaapi")) {
         if (capture->bitrate > 0)
@@ -336,6 +341,14 @@ void window_capture_stop(WindowCapture *capture) {
         gst_element_send_event(audio, gst_event_new_eos());
         gst_object_unref(audio);
     }
+}
+
+void window_capture_cancel(WindowCapture *capture) {
+    if (capture) capture_finish(capture, "Recording discarded");
+}
+
+gboolean window_capture_recording(WindowCapture *capture) {
+    return capture && capture->playing;
 }
 
 GdkTexture *window_capture_preview(WindowCapture *capture) {

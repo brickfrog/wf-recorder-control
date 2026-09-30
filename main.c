@@ -13,14 +13,14 @@ typedef struct {
     GtkWidget *window;
     GtkWidget *output, *audio, *format, *codec, *quality, *preset;
     GtkWidget *fps, *crf, *bitrate, *folder, *device, *pixel, *filter, *params;
-    GtkWidget *no_damage, *no_dmabuf, *status, *timer, *rec_dot, *start, *stop;
+    GtkWidget *no_damage, *no_dmabuf, *status, *timer, *rec_dot, *start, *stop, *discard, *live_badge;
     GtkWidget *controls, *pages, *advanced, *capture_buttons[3];
     GtkWidget *preview, *preview_placeholder, *live_target, *live_size, *live_rate, *level, *level_row;
     GtkWidget *last_card, *last_video, *last_name, *last_meta, *countdown, *countdown_label;
     const gchar *capture_mode;
     GSubprocess *recording;
     WindowCapture *window_capture;
-    gboolean selecting, counting;
+    gboolean selecting, counting, discarding, finalizing;
     gchar *filename, *geometry;
     gint64 started_us;
     guint timer_source, preview_source, meter_watch, live_generation, countdown_source, countdown_left;
@@ -449,8 +449,12 @@ static void recording_state(Recorder *r, gboolean active) {
     gtk_widget_set_visible(r->start, !active);
     gtk_widget_set_visible(r->stop, active);
     gtk_widget_set_sensitive(r->stop, active);
+    gtk_widget_set_visible(r->discard, active);
+    gtk_widget_set_sensitive(r->discard, active);
+    r->finalizing = FALSE;
     gtk_widget_set_visible(r->timer, active);
     gtk_widget_set_visible(r->rec_dot, active);
+    gtk_widget_set_visible(r->live_badge, active);
     gtk_button_set_label(GTK_BUTTON(r->stop), "Stop and save");
     gtk_stack_set_visible_child_name(GTK_STACK(r->pages), active ? "live" : "settings");
     if (r->timer_source) {
@@ -505,6 +509,16 @@ static void reveal_saved_file(Recorder *r, gboolean saved) {
     g_free(name);
     update_last_meta(r);
     gtk_adjustment_set_value(gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(r->controls)), 0);
+}
+
+/* After a discarded capture ends: delete the partial file. Returns TRUE if it handled the end. */
+static gboolean finish_discard(Recorder *r) {
+    if (!r->discarding) return FALSE;
+    r->discarding = FALSE;
+    if (r->filename) g_unlink(r->filename);
+    reveal_saved_file(r, FALSE);
+    set_status(r, "Recording discarded");
+    return TRUE;
 }
 
 static gchar *next_filename(const gchar *folder, const gchar *format) {
@@ -592,9 +606,22 @@ static GPtrArray *build_command(Recorder *r, const gchar *geometry, GError **err
     } else if (!g_strcmp0(codec, "libx264") || !g_strcmp0(codec, "libx265")) {
         add_pair_owned(args, "-p", g_strdup_printf("crf=%d", quantizer));
         add_pair_owned(args, "-p", g_strdup_printf("preset=%s", selected(r->preset)));
-    } else if (!g_strcmp0(codec, "libvpx-vp9") || !g_strcmp0(codec, "libaom-av1")) {
+    } else if (!g_strcmp0(codec, "libvpx-vp9")) {
+        /* Default VP9/AV1 settings encode far slower than real time; wf-recorder then queues
+         * frames in memory and Stop waits minutes while it drains them. */
         add_pair_owned(args, "-p", g_strdup_printf("crf=%d", quantizer));
         add_pair(args, "-p", "b=0");
+        add_pair(args, "-p", "deadline=realtime");
+        add_pair(args, "-p", "cpu-used=8");
+        add_pair(args, "-p", "row-mt=1");
+        add_pair(args, "-p", "threads=0");
+    } else if (!g_strcmp0(codec, "libaom-av1")) {
+        add_pair_owned(args, "-p", g_strdup_printf("crf=%d", quantizer));
+        add_pair(args, "-p", "b=0");
+        add_pair(args, "-p", "usage=realtime");
+        add_pair(args, "-p", "cpu-used=8");
+        add_pair(args, "-p", "row-mt=1");
+        add_pair(args, "-p", "threads=0");
     }
     const struct { GtkWidget *widget; const gchar *flag; } optional[] = {
         {r->device, "-d"}, {r->pixel, "-x"}, {r->filter, "-F"}
@@ -603,6 +630,10 @@ static GPtrArray *build_command(Recorder *r, const gchar *geometry, GError **err
         const gchar *value = gtk_editable_get_text(GTK_EDITABLE(optional[i].widget));
         if (*value) add_pair(args, optional[i].flag, value);
     }
+    /* Without -x, wf-recorder feeds VP9/AV1 4:4:4 RGB (gbrp), which encodes several times slower
+     * and plays in fewer players. */
+    if (!*gtk_editable_get_text(GTK_EDITABLE(r->pixel)) && !info->hardware)
+        add_pair(args, "-x", "yuv420p");
     if (!append_params(args, gtk_editable_get_text(GTK_EDITABLE(r->params)), error)) {
         g_ptr_array_free(args, TRUE);
         return NULL;
@@ -621,6 +652,7 @@ static void recording_finished(GObject *source, GAsyncResult *result, gpointer d
                                           &stdout_text, &stderr_text, &error);
     g_clear_object(&r->recording);
     recording_state(r, FALSE);
+    if (finish_discard(r)) goto done;
     GStatBuf info;
     gboolean saved = r->filename && g_stat(r->filename, &info) == 0 && info.st_size > 0;
     reveal_saved_file(r, saved);
@@ -634,6 +666,7 @@ static void recording_finished(GObject *source, GAsyncResult *result, gpointer d
         set_status(r, message);
         g_free(message);
     }
+done:
     g_clear_error(&error);
     g_free(stdout_text);
     g_free(stderr_text);
@@ -657,6 +690,7 @@ static void window_event(WindowCaptureState state, const gchar *error, gpointer 
     }
     r->window_capture = NULL;
     recording_state(r, FALSE);
+    if (finish_discard(r)) return;
     GStatBuf info;
     gboolean saved = !error && r->filename && g_stat(r->filename, &info) == 0 && info.st_size > 0;
     reveal_saved_file(r, saved);
@@ -852,19 +886,54 @@ static void start_clicked(GtkButton *button, gpointer data) {
     } else begin_recording(r);
 }
 
+/* Stop pressed: the capture is over, so freeze the live view while the encoder finishes. */
+static void finalizing_state(Recorder *r) {
+    r->finalizing = TRUE;
+    gtk_widget_set_sensitive(r->stop, FALSE);
+    if (r->timer_source) {
+        g_source_remove(r->timer_source);
+        r->timer_source = 0;
+    }
+    stop_live(r);
+    gtk_widget_set_visible(r->rec_dot, FALSE);
+    gtk_widget_set_visible(r->timer, FALSE);
+    gtk_widget_set_visible(r->live_badge, FALSE);
+    show_preview_frame(r, NULL);
+    gtk_label_set_text(GTK_LABEL(r->preview_placeholder), "Saving the recording…");
+    set_status(r, "Saving the recording… Press Discard to abort without saving.");
+}
+
 static void stop_clicked(GtkButton *button, gpointer data) {
     Recorder *r = data;
     (void)button;
+    if (r->finalizing) return;
     if (r->counting) cancel_countdown(r);
+    else if (r->window_capture && !r->selecting && !window_capture_recording(r->window_capture))
+        window_capture_stop(r->window_capture);
     else if (r->recording) {
-        gtk_widget_set_sensitive(r->stop, FALSE);
-        set_status(r, "Finalizing recording…");
+        finalizing_state(r);
         g_subprocess_send_signal(r->recording, SIGINT);
     } else if (r->window_capture && !r->selecting) {
-        gtk_widget_set_sensitive(r->stop, FALSE);
-        set_status(r, "Finalizing recording…");
+        finalizing_state(r);
         window_capture_stop(r->window_capture);
     }
+}
+
+/* Aborts recording or saving at once and deletes the partial file. */
+static void discard_clicked(GtkButton *button, gpointer data) {
+    Recorder *r = data;
+    (void)button;
+    if (r->counting) {
+        cancel_countdown(r);
+        return;
+    }
+    if (!r->recording && !r->window_capture) return;
+    r->discarding = TRUE;
+    gtk_widget_set_sensitive(r->discard, FALSE);
+    gtk_widget_set_sensitive(r->stop, FALSE);
+    set_status(r, "Discarding…");
+    if (r->recording) g_subprocess_force_exit(r->recording);
+    else window_capture_cancel(r->window_capture);
 }
 
 static gboolean shortcut_pressed(GtkEventControllerKey *controller, guint keyval,
@@ -887,7 +956,7 @@ static gboolean close_requested(GtkWindow *window, gpointer data) {
         save_settings(r);
         return FALSE;
     }
-    set_status(r, "Stop and save before closing");
+    set_status(r, "Stop and save, or discard, before closing");
     return TRUE;
 }
 
@@ -1044,6 +1113,7 @@ static GtkWidget *live_page(Recorder *r) {
     gtk_widget_add_css_class(r->preview_placeholder, "preview-placeholder");
     gtk_overlay_add_overlay(GTK_OVERLAY(frame), r->preview_placeholder);
     GtkWidget *badge = gtk_label_new("LIVE");
+    r->live_badge = badge;
     gtk_widget_add_css_class(badge, "live-badge");
     gtk_widget_set_halign(badge, GTK_ALIGN_START);
     gtk_widget_set_valign(badge, GTK_ALIGN_START);
@@ -1195,7 +1265,7 @@ static void activated(GtkApplication *app, gpointer data) {
         {"medium", "Medium"}, {"slow", "Slow"}, {"veryslow", "Very slow"}
     };
     r->preset = combo(presets, G_N_ELEMENTS(presets));
-    gtk_combo_box_set_active(GTK_COMBO_BOX(r->preset), 3);
+    gtk_combo_box_set_active(GTK_COMBO_BOX(r->preset), 1);
     g_signal_connect(r->codec, "changed", G_CALLBACK(codec_changed), r);
     g_signal_connect(r->quality, "changed", G_CALLBACK(quality_changed), r);
     g_signal_connect(r->format, "changed", G_CALLBACK(format_changed), r);
@@ -1276,6 +1346,11 @@ static void activated(GtkApplication *app, gpointer data) {
     gtk_widget_set_visible(r->stop, FALSE);
     g_signal_connect(r->stop, "clicked", G_CALLBACK(stop_clicked), r);
     gtk_box_append(GTK_BOX(buttons), r->stop);
+    r->discard = gtk_button_new_with_label("Discard");
+    gtk_widget_set_tooltip_text(r->discard, "Stop immediately and delete this recording");
+    gtk_widget_set_visible(r->discard, FALSE);
+    g_signal_connect(r->discard, "clicked", G_CALLBACK(discard_clicked), r);
+    gtk_box_append(GTK_BOX(buttons), r->discard);
     gtk_window_set_focus(GTK_WINDOW(r->window), r->start);
     gtk_window_present(GTK_WINDOW(r->window));
 }

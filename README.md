@@ -9,7 +9,8 @@ A GTK4 screen recorder for Wayland. It uses `slurp` and `wf-recorder` for region
 - Watch a live preview while recording, with file size, average bitrate, and an audio level meter. Window capture previews its own frames at up to 15 fps; region and display capture take a `grim` snapshot every second.
 - Save MP4, WebM, or Matroska video with codec choices filtered by format and installed encoders.
 - Set audio source, frame rate, quality, output folder, and optional `wf-recorder` arguments for region/display capture.
-- Keep recording controls and the timer visible while scrolling. Use **Ctrl+R** to start or **Ctrl+Shift+R** to stop (or cancel the countdown) when the app is focused.
+- Keep recording controls and the timer visible while scrolling. Use **Ctrl+R** to start or **Ctrl+Shift+R** to stop (or cancel the countdown) when the app is focused. **Discard** stops at once and deletes the recording, including while it is still saving.
+- VP9 and AV1 use real-time encoder settings and 4:2:0 color (unless you set a pixel format), so saving finishes about a second after you press Stop.
 - Play the last recording inline, see its length, resolution, and size, and open the video or its folder. Settings persist in `$XDG_CONFIG_HOME/wf-recorder-control/settings.ini`.
 
 | Container | Available video codecs |
