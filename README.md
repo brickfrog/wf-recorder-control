@@ -6,10 +6,10 @@ A GTK4 screen recorder for Wayland. It uses `slurp` and `wf-recorder` for region
 
 - Record a selected window, screen region, or display. Pick the mode from the Region, Window, and Display tiles.
 - Optionally count down 3 seconds after you choose the target and before recording starts.
-- Watch a live preview while recording, with file size, average bitrate, and an audio level meter. Window capture previews its own frames at up to 15 fps; region and display capture take a `grim` snapshot every second.
+- Click **Preview target** to choose a target and check its live preview, then **Start recording** when ready. The preview stops during recording; file size, average bitrate, and the audio level meter remain available. Region selection keeps the controller mapped and temporarily transparent so its window position stays in place.
 - Save MP4, WebM, or Matroska video with codec choices filtered by format and installed encoders.
 - Set audio source, frame rate, quality, output folder, and optional `wf-recorder` arguments for region/display capture.
-- Keep recording controls and the timer visible while scrolling. Use **Ctrl+R** to start or **Ctrl+Shift+R** to stop (or cancel the countdown) when the app is focused. **Discard** stops at once and deletes the recording, including while it is still saving.
+- Keep recording controls and the timer visible while scrolling. Use **Ctrl+R** to prepare the preview, then again to start, or **Ctrl+Shift+R** to stop (or cancel the preview/countdown) when the app is focused. **Discard** stops at once and deletes the recording, including while it is still saving.
 - VP9 and AV1 use real-time encoder settings and 4:2:0 color (unless you set a pixel format), so saving finishes about a second after you press Stop.
 - Play the last recording inline, see its length, resolution, and size, and open the video or its folder. Settings persist in `$XDG_CONFIG_HOME/wf-recorder-control/settings.ini`.
 
@@ -37,7 +37,7 @@ make check
 
 ## Selected-window capture on niri
 
-Choose **Select a window**, click **Start recording**, and pick the target in the portal dialog. On niri, the ScreenCast portal needs a window-capable backend such as `xdg-desktop-portal-gnome`. If your `~/.config/xdg-desktop-portal/portals.conf` overrides portal selection, add this under `[preferred]`:
+Choose **Select a window**, click **Preview target**, and pick the target in the portal dialog. Check the preview, move the recorder controls out of the way, then click **Start recording**. On niri, the ScreenCast portal needs a window-capable backend such as `xdg-desktop-portal-gnome`. If your `~/.config/xdg-desktop-portal/portals.conf` overrides portal selection, add this under `[preferred]`:
 
 ```ini
 org.freedesktop.impl.portal.ScreenCast=gnome

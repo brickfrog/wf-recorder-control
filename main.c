@@ -18,9 +18,9 @@ typedef struct {
     GtkWidget *preview, *preview_placeholder, *live_target, *live_size, *live_rate, *level, *level_row;
     GtkWidget *last_card, *last_video, *last_name, *last_meta, *countdown, *countdown_label;
     const gchar *capture_mode;
-    GSubprocess *recording;
+    GSubprocess *recording, *preview_process;
     WindowCapture *window_capture;
-    gboolean selecting, counting, discarding, finalizing;
+    gboolean selecting, prepared, counting, discarding, finalizing;
     gchar *filename, *geometry;
     gint64 started_us;
     guint timer_source, preview_source, meter_watch, live_generation, countdown_source, countdown_left;
@@ -308,6 +308,7 @@ static void grim_finished(GObject *source, GAsyncResult *result, gpointer data) 
     GBytes *image = NULL;
     g_subprocess_communicate_finish(G_SUBPROCESS(source), result, &image, NULL, NULL);
     r->grim_busy = FALSE;
+    g_clear_object(&r->preview_process);
     if (request->generation == r->live_generation && r->preview_source && image &&
         g_subprocess_get_successful(G_SUBPROCESS(source))) {
         GdkTexture *frame = gdk_texture_new_from_bytes(image, NULL);
@@ -344,6 +345,7 @@ static void request_grim_frame(Recorder *r) {
     g_ptr_array_free(args, TRUE);
     if (!process) return;
     r->grim_busy = TRUE;
+    r->preview_process = g_object_ref(process);
     GrimRequest *request = g_new(GrimRequest, 1);
     request->r = r;
     request->generation = r->live_generation;
@@ -352,6 +354,7 @@ static void request_grim_frame(Recorder *r) {
 
 static gboolean update_preview(gpointer data) {
     Recorder *r = data;
+    if (!r->prepared || r->recording) return G_SOURCE_CONTINUE;
     if (r->window_capture) {
         GdkTexture *frame = window_capture_preview(r->window_capture);
         if (frame) {
@@ -406,12 +409,19 @@ static void start_meter(Recorder *r) {
         gtk_widget_set_visible(r->level_row, FALSE);
 }
 
-static void stop_live(Recorder *r) {
+static void stop_preview(Recorder *r) {
     r->live_generation++;
+    if (r->preview_process) g_subprocess_force_exit(r->preview_process);
     if (r->preview_source) {
         g_source_remove(r->preview_source);
         r->preview_source = 0;
     }
+}
+
+static void stop_live(Recorder *r) {
+    r->prepared = FALSE;
+    gtk_button_set_label(GTK_BUTTON(r->start), "Preview target");
+    stop_preview(r);
     if (r->meter_watch) {
         g_source_remove(r->meter_watch);
         r->meter_watch = 0;
@@ -423,7 +433,7 @@ static void stop_live(Recorder *r) {
     g_clear_pointer(&r->geometry, g_free);
 }
 
-static void start_live(Recorder *r) {
+static void start_preview(Recorder *r) {
     show_preview_frame(r, NULL);
     gtk_label_set_text(GTK_LABEL(r->live_size), "0 bytes");
     gtk_label_set_text(GTK_LABEL(r->live_rate), "—");
@@ -432,7 +442,8 @@ static void start_live(Recorder *r) {
                   : g_strdup_printf("Display %s", selected(r->output));
     gtk_label_set_text(GTK_LABEL(r->live_target), target);
     g_free(target);
-    gboolean grim = !r->window_capture && g_find_program_in_path("grim") != NULL;
+    gchar *grim = r->window_capture ? NULL : g_find_program_in_path("grim");
+    gtk_widget_set_visible(r->level_row, FALSE);
     gtk_label_set_text(GTK_LABEL(r->preview_placeholder),
         r->window_capture || grim ? "Waiting for the first frame…" : "Install grim to preview region and display recordings");
     if (r->window_capture) r->preview_source = g_timeout_add(66, update_preview, r);
@@ -440,7 +451,20 @@ static void start_live(Recorder *r) {
         r->preview_source = g_timeout_add(1000, update_preview, r);
         request_grim_frame(r);
     }
-    start_meter(r);
+    g_free(grim);
+}
+
+static void target_prepared(Recorder *r) {
+    r->prepared = TRUE;
+    gtk_stack_set_visible_child_name(GTK_STACK(r->pages), "live");
+    gtk_widget_set_sensitive(r->start, TRUE);
+    gtk_widget_set_visible(r->start, TRUE);
+    gtk_button_set_label(GTK_BUTTON(r->start), "Start recording");
+    gtk_widget_set_visible(r->stop, TRUE);
+    gtk_widget_set_sensitive(r->stop, TRUE);
+    gtk_button_set_label(GTK_BUTTON(r->stop), "Cancel");
+    start_preview(r);
+    set_status(r, "Check the preview, move the controls out of the way, then start recording.");
 }
 
 static void recording_state(Recorder *r, gboolean active) {
@@ -465,7 +489,10 @@ static void recording_state(Recorder *r, gboolean active) {
         r->started_us = g_get_monotonic_time();
         update_timer(r);
         r->timer_source = g_timeout_add_seconds(1, update_timer, r);
-        start_live(r);
+        stop_preview(r);
+        show_preview_frame(r, NULL);
+        gtk_label_set_text(GTK_LABEL(r->preview_placeholder), "Recording — preview paused");
+        start_meter(r);
     } else stop_live(r);
 }
 
@@ -678,7 +705,7 @@ static void window_event(WindowCaptureState state, const gchar *error, gpointer 
     Recorder *r = data;
     r->selecting = FALSE;
     if (state == WINDOW_CAPTURE_SELECTED) {
-        begin_recording(r);
+        target_prepared(r);
         return;
     }
     if (state == WINDOW_CAPTURE_STARTED) {
@@ -745,7 +772,7 @@ static void launch_recording(Recorder *r) {
     g_subprocess_communicate_utf8_async(r->recording, NULL, NULL, recording_finished, r);
     return;
 failed:
-    g_clear_pointer(&r->geometry, g_free);
+    recording_state(r, FALSE);
     set_status(r, error ? error->message : "Could not start recording");
     gtk_widget_set_sensitive(r->start, TRUE);
     gtk_widget_set_sensitive(r->controls, TRUE);
@@ -775,6 +802,10 @@ static void countdown_show(Recorder *r) {
 }
 
 static void start_now(Recorder *r) {
+    r->prepared = FALSE;
+    stop_preview(r);
+    show_preview_frame(r, NULL);
+    gtk_label_set_text(GTK_LABEL(r->preview_placeholder), "Recording — preview paused");
     if (!r->window_capture) {
         launch_recording(r);
         return;
@@ -819,7 +850,7 @@ static void cancel_countdown(Recorder *r) {
         window_capture_stop(r->window_capture);
         return;
     }
-    g_clear_pointer(&r->geometry, g_free);
+    recording_state(r, FALSE);
     set_status(r, "Recording cancelled");
     gtk_widget_set_sensitive(r->start, TRUE);
     gtk_widget_set_sensitive(r->controls, TRUE);
@@ -832,11 +863,10 @@ static void region_selected(GObject *source, GAsyncResult *result, gpointer data
     g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), result,
                                           &geometry, &stderr_text, &error);
     r->selecting = FALSE;
-    gtk_widget_set_visible(r->window, TRUE);
-    gtk_window_present(GTK_WINDOW(r->window));
+    gtk_widget_set_opacity(r->window, 1.0);
     if (!error && g_subprocess_get_successful(G_SUBPROCESS(source)) && geometry && *g_strstrip(geometry)) {
         r->geometry = g_strdup(geometry);
-        begin_recording(r);
+        target_prepared(r);
     } else {
         set_status(r, "Region selection cancelled");
         gtk_widget_set_sensitive(r->start, TRUE);
@@ -855,7 +885,7 @@ static gboolean start_slurp(gpointer data) {
     GSubprocess *process = g_subprocess_newv(argv, G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                                             G_SUBPROCESS_FLAGS_STDERR_PIPE, &error);
     if (!process) {
-        gtk_widget_set_visible(r->window, TRUE);
+        gtk_widget_set_opacity(r->window, 1.0);
         r->selecting = FALSE;
         set_status(r, error->message);
         gtk_widget_set_sensitive(r->start, TRUE);
@@ -868,6 +898,11 @@ static gboolean start_slurp(gpointer data) {
 static void start_clicked(GtkButton *button, gpointer data) {
     Recorder *r = data;
     (void)button;
+    if (r->prepared && !r->counting) {
+        gtk_widget_set_sensitive(r->start, FALSE);
+        begin_recording(r);
+        return;
+    }
     if (r->recording || r->window_capture || r->selecting || r->counting) return;
     if (!*selected(r->codec)) {
         set_status(r, "No encoder is available for this format and capture mode");
@@ -881,9 +916,10 @@ static void start_clicked(GtkButton *button, gpointer data) {
     else if (!g_strcmp0(r->capture_mode, "region")) {
         r->selecting = TRUE;
         set_status(r, "Select a region…");
-        gtk_widget_set_visible(r->window, FALSE);
+        /* Keep the Wayland surface mapped so the compositor preserves its position. */
+        gtk_widget_set_opacity(r->window, 0.0);
         g_timeout_add(180, start_slurp, r);
-    } else begin_recording(r);
+    } else target_prepared(r);
 }
 
 /* Stop pressed: the capture is over, so freeze the live view while the encoder finishes. */
@@ -907,7 +943,7 @@ static void stop_clicked(GtkButton *button, gpointer data) {
     Recorder *r = data;
     (void)button;
     if (r->finalizing) return;
-    if (r->counting) cancel_countdown(r);
+    if (r->counting || r->prepared) cancel_countdown(r);
     else if (r->window_capture && !r->selecting && !window_capture_recording(r->window_capture))
         window_capture_stop(r->window_capture);
     else if (r->recording) {
@@ -944,15 +980,15 @@ static gboolean shortcut_pressed(GtkEventControllerKey *controller, guint keyval
     if (keyval != GDK_KEY_r && keyval != GDK_KEY_R) return FALSE;
     if (!(state & GDK_CONTROL_MASK)) return FALSE;
     if (state & GDK_SHIFT_MASK) {
-        if (r->counting || r->recording || (r->window_capture && !r->selecting)) stop_clicked(NULL, r);
-    } else if (!r->recording && !r->window_capture && !r->selecting && !r->counting) start_clicked(NULL, r);
+        if (r->prepared || r->counting || r->recording || (r->window_capture && !r->selecting)) stop_clicked(NULL, r);
+    } else if (r->prepared || (!r->recording && !r->window_capture && !r->selecting && !r->counting)) start_clicked(NULL, r);
     return TRUE;
 }
 
 static gboolean close_requested(GtkWindow *window, gpointer data) {
     Recorder *r = data;
     (void)window;
-    if (!r->recording && !r->window_capture && !r->selecting && !r->counting) {
+    if (!r->prepared && !r->recording && !r->window_capture && !r->selecting && !r->counting) {
         save_settings(r);
         return FALSE;
     }
@@ -1094,7 +1130,7 @@ static GtkWidget *live_page(Recorder *r) {
     gtk_widget_set_margin_bottom(page, 18);
     gtk_widget_set_margin_start(page, 18);
     gtk_widget_set_margin_end(page, 18);
-    GtkWidget *preview_card = section(page, "Live preview");
+    GtkWidget *preview_card = section(page, "Target preview");
     gtk_widget_set_vexpand(gtk_widget_get_parent(preview_card), TRUE);
     gtk_widget_set_vexpand(preview_card, TRUE);
     GtkWidget *frame = gtk_overlay_new();
@@ -1112,7 +1148,7 @@ static GtkWidget *live_page(Recorder *r) {
     gtk_label_set_justify(GTK_LABEL(r->preview_placeholder), GTK_JUSTIFY_CENTER);
     gtk_widget_add_css_class(r->preview_placeholder, "preview-placeholder");
     gtk_overlay_add_overlay(GTK_OVERLAY(frame), r->preview_placeholder);
-    GtkWidget *badge = gtk_label_new("LIVE");
+    GtkWidget *badge = gtk_label_new("REC");
     r->live_badge = badge;
     gtk_widget_add_css_class(badge, "live-badge");
     gtk_widget_set_halign(badge, GTK_ALIGN_START);
@@ -1332,12 +1368,15 @@ static void activated(GtkApplication *app, gpointer data) {
     r->status = gtk_label_new("Ready to record");
     gtk_label_set_xalign(GTK_LABEL(r->status), 0);
     gtk_label_set_wrap(GTK_LABEL(r->status), TRUE);
+    gtk_label_set_lines(GTK_LABEL(r->status), 2);
+    gtk_label_set_ellipsize(GTK_LABEL(r->status), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_size_request(r->status, -1, 48);
     gtk_label_set_selectable(GTK_LABEL(r->status), TRUE);
     gtk_widget_set_hexpand(r->status, TRUE);
     gtk_box_append(GTK_BOX(state_line), r->status);
     GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_box_append(GTK_BOX(footer), buttons);
-    r->start = gtk_button_new_with_label("Start recording");
+    r->start = gtk_button_new_with_label("Preview target");
     gtk_widget_add_css_class(r->start, "suggested-action");
     g_signal_connect(r->start, "clicked", G_CALLBACK(start_clicked), r);
     gtk_box_append(GTK_BOX(buttons), r->start);

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <gio/gio.h>
+#include <gtk/gtk.h>
 #include <gst/gst.h>
 
 typedef struct PortalPipeWire PortalPipeWire;
@@ -17,3 +17,6 @@ void portal_pipewire_activate(PortalPipeWire *source);
 /* Stops pushing and sends the newest frame once more so the video covers the full duration. Main thread. */
 void portal_pipewire_finish_frame(PortalPipeWire *source);
 void portal_pipewire_free(PortalPipeWire *source);
+
+/* Snapshot of the newest received frame, only before activation. Main thread. */
+GdkTexture *portal_pipewire_preview(PortalPipeWire *source);

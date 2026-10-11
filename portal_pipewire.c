@@ -34,6 +34,8 @@ struct PortalPipeWire {
     guint heartbeat;
     GMutex frame_lock;
     GstBuffer *last_frame;
+    guint frame_width, frame_height;
+    gboolean frame_alpha;
     gint64 last_push_us;
 };
 
@@ -124,6 +126,9 @@ static void process_frame(void *data) {
                 g_mutex_lock(&source->frame_lock);
                 gst_clear_buffer(&source->last_frame);
                 source->last_frame = gst_buffer_ref(out);
+                source->frame_width = width;
+                source->frame_height = height;
+                source->frame_alpha = source->video.format == SPA_VIDEO_FORMAT_BGRA;
                 if (active) source->last_push_us = g_get_monotonic_time();
                 g_mutex_unlock(&source->frame_lock);
                 g_atomic_int_inc(&source->frames_seen);
@@ -279,4 +284,21 @@ void portal_pipewire_free(PortalPipeWire *source) {
     g_mutex_clear(&source->frame_lock);
     g_free(source->failure);
     g_free(source);
+}
+
+GdkTexture *portal_pipewire_preview(PortalPipeWire *source) {
+    if (!source || g_atomic_int_get(&source->active)) return NULL;
+    g_mutex_lock(&source->frame_lock);
+    GdkTexture *texture = NULL;
+    GstMapInfo map;
+    if (source->last_frame && gst_buffer_map(source->last_frame, &map, GST_MAP_READ)) {
+        GBytes *bytes = g_bytes_new(map.data, map.size);
+        texture = gdk_memory_texture_new(source->frame_width, source->frame_height,
+            source->frame_alpha ? GDK_MEMORY_B8G8R8A8 : GDK_MEMORY_B8G8R8X8,
+            bytes, (gsize)source->frame_width * 4);
+        g_bytes_unref(bytes);
+        gst_buffer_unmap(source->last_frame, &map);
+    }
+    g_mutex_unlock(&source->frame_lock);
+    return texture;
 }

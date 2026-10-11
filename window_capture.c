@@ -2,7 +2,6 @@
 #include "portal_pipewire.h"
 
 #include <gst/gst.h>
-#include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
 #include <libportal-gtk4/portal-gtk4.h>
 #include <unistd.h>
@@ -18,7 +17,7 @@ struct WindowCapture {
     guint source_watch;
     gint pipewire_fd;
     guint node;
-    gboolean playing;
+    gboolean playing, record_requested;
     gchar *filename, *format, *codec, *preset, *audio;
     gint fps, quantizer, bitrate;
     WindowCaptureEvent event;
@@ -119,7 +118,7 @@ static gboolean source_health(gpointer data) {
         g_free(message);
         return G_SOURCE_REMOVE;
     }
-    if (!capture->playing && portal_pipewire_frames_seen(capture->source) > 0 && !start_playing(capture))
+    if (capture->record_requested && !capture->playing && portal_pipewire_frames_seen(capture->source) > 0 && !start_playing(capture))
         return G_SOURCE_REMOVE;
     return G_SOURCE_CONTINUE;
 }
@@ -161,12 +160,8 @@ static gboolean start_pipeline(WindowCapture *capture, GError **error) {
     gchar *description = g_strdup_printf(
         "%s name=mux ! filesink name=output sync=false "
         "appsrc name=video_src is-live=true format=time do-timestamp=true max-buffers=4 leaky-type=downstream ! videoconvert ! videorate ! "
-        "video/x-raw,framerate=%d/1 ! tee name=split "
-        "split. ! queue leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! videorate drop-only=true max-rate=15 ! "
-        "videoscale ! videoconvert ! video/x-raw,format=RGBA,width=%d,pixel-aspect-ratio=1/1 ! "
-        "appsink name=preview max-buffers=1 drop=true sync=false async=false wait-on-eos=false "
-        "split. ! queue ! %s name=video_encoder ! %s ! queue ! mux. %s",
-        mux, capture->fps, WINDOW_CAPTURE_PREVIEW_WIDTH, encoder, parser,
+        "video/x-raw,framerate=%d/1 ! queue ! %s name=video_encoder ! %s ! queue ! mux. %s",
+        mux, capture->fps, encoder, parser,
         with_audio ? "pulsesrc name=audio_src ! audioconvert ! audioresample ! queue ! " : "");
     if (with_audio) {
         gchar *with_encoder = g_strconcat(description, audio_encoder, " ! queue ! mux.", NULL);
@@ -225,12 +220,8 @@ static gboolean start_pipeline(WindowCapture *capture, GError **error) {
     GstBus *bus = gst_element_get_bus(capture->pipeline);
     capture->bus_watch = gst_bus_add_watch(bus, bus_message, capture);
     gst_object_unref(bus);
-    if (gst_element_set_state(capture->pipeline, GST_STATE_READY) == GST_STATE_CHANGE_FAILURE) {
-        gchar *message = state_failure(capture->pipeline);
-        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_FAILED, message);
-        g_free(message);
-        goto fail;
-    }
+    /* Leave encoders, audio, and filesink in NULL until Start. PipeWire can
+     * collect preview frames without opening the output file or recording. */
     capture->source = portal_pipewire_new(capture->pipewire_fd, capture->node, source, error);
     if (!capture->source) goto fail;
     close(capture->pipewire_fd);
@@ -272,15 +263,16 @@ static void session_started(GObject *source, GAsyncResult *result, gpointer data
         capture_finish(capture, "Could not open window video stream");
         return;
     }
+    if (!start_pipeline(capture, &error)) {
+        capture_finish(capture, error ? error->message : "Could not prepare window preview");
+        g_clear_error(&error);
+        return;
+    }
     capture->event(WINDOW_CAPTURE_SELECTED, NULL, capture->data);
 }
 
 void window_capture_record(WindowCapture *capture) {
-    GError *error = NULL;
-    if (!start_pipeline(capture, &error)) {
-        capture_finish(capture, error ? error->message : "Could not start window recorder");
-        g_clear_error(&error);
-    }
+    if (capture) capture->record_requested = TRUE;
 }
 
 static void session_created(GObject *source, GAsyncResult *result, gpointer data) {
@@ -352,27 +344,5 @@ gboolean window_capture_recording(WindowCapture *capture) {
 }
 
 GdkTexture *window_capture_preview(WindowCapture *capture) {
-    if (!capture || !capture->pipeline) return NULL;
-    GstElement *sink = gst_bin_get_by_name(GST_BIN(capture->pipeline), "preview");
-    if (!sink) return NULL;
-    GstSample *sample = gst_app_sink_try_pull_sample(GST_APP_SINK(sink), 0);
-    gst_object_unref(sink);
-    if (!sample) return NULL;
-    GdkTexture *texture = NULL;
-    GstStructure *caps = gst_caps_get_structure(gst_sample_get_caps(sample), 0);
-    GstBuffer *buffer = gst_sample_get_buffer(sample);
-    gint width = 0, height = 0;
-    GstMapInfo map;
-    if (gst_structure_get_int(caps, "width", &width) && gst_structure_get_int(caps, "height", &height) &&
-        width > 0 && height > 0 && gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-        gsize stride = (gsize)width * 4;
-        if (map.size >= stride * (gsize)height) {
-            GBytes *bytes = g_bytes_new(map.data, stride * (gsize)height);
-            texture = gdk_memory_texture_new(width, height, GDK_MEMORY_R8G8B8A8, bytes, stride);
-            g_bytes_unref(bytes);
-        }
-        gst_buffer_unmap(buffer, &map);
-    }
-    gst_sample_unref(sample);
-    return texture;
+    return capture && !capture->record_requested ? portal_pipewire_preview(capture->source) : NULL;
 }

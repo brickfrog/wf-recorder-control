@@ -8,10 +8,14 @@ wf-recorder-control: main.c window_capture.c window_capture.h portal_pipewire.c 
 test-encoding: test_encoding.c encoding.c encoding.h
 	$(CC) $(CFLAGS) -o $@ test_encoding.c encoding.c $(LDLIBS)
 
+test-window-capture: test_window_capture.c window_capture.c window_capture.h portal_pipewire.c portal_pipewire.h
+	$(CC) $(CFLAGS) -o $@ test_window_capture.c $(LDLIBS)
+
 .PHONY: check
-check: test-encoding
+check: test-encoding test-window-capture
 	./test-encoding
+	./test-window-capture
 
 .PHONY: clean
 clean:
-	rm -f wf-recorder-control test-encoding
+	rm -f wf-recorder-control test-encoding test-window-capture

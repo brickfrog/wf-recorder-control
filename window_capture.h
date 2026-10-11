@@ -17,7 +17,7 @@ WindowCapture *window_capture_begin(GtkWindow *parent, const gchar *filename,
                                      gint fps, gint quantizer, gint bitrate, const gchar *preset,
                                      const gchar *audio, WindowCaptureEvent event,
                                      gpointer data);
-/* Opens the stream and waits for the first window frame before recording (STARTED). */
+/* Ends preview and waits for the first window frame before recording (STARTED). */
 void window_capture_record(WindowCapture *capture);
 /* Finalizes a recording, or cancels a capture that has not started recording. */
 void window_capture_stop(WindowCapture *capture);
@@ -25,5 +25,5 @@ void window_capture_stop(WindowCapture *capture);
 void window_capture_cancel(WindowCapture *capture);
 /* TRUE once the first frame arrived and the recording timeline started. */
 gboolean window_capture_recording(WindowCapture *capture);
-/* Returns the newest preview frame since the previous call, or NULL. Main thread only. */
+/* Returns the newest window frame before recording is requested, or NULL. Main thread only. */
 GdkTexture *window_capture_preview(WindowCapture *capture);
